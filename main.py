@@ -2,36 +2,34 @@ import os
 import re
 import time
 import threading
-import requests
-from flask import Flask, request, Response
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 import yt_dlp
 from google import genai
 
-# API Keys from Render Environment
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GREEN_API_ID = os.getenv("GREEN_API_ID", "710722774773")
-GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN")
-GREEN_API_URL = "https://7107.api.greenapi.com"
 
-# Initialize Bots
-tele_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-app = Flask(__name__)
+# Store memory of the last video per user for follow-up questions
+# Format: { chat_id: {"summary": "...", "name": "..."} }
+user_sessions = {}
 
-MALAYALAM_PROMPT = """
-Analyze this video and reply in NATURAL CASUAL MALAYALAM (മലയാളം):
-📌 സംഗ്രഹം & ഫാക്ട് ചെക്ക്:
-• 2-3 പ്രധാന കാര്യങ്ങൾ.
-• ചേരുവകൾ/സ്റ്റെപ്പുകൾ ഉണ്ടെങ്കിൽ അത് പറയുക, ഒപ്പം ഇത് ശരിയാണോ എന്ന് വ്യക്തമാക്കുക.
+# Keep-alive server for Render
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-🔥 വൈറൽ കമന്റുകൾ (Top 3):
-1. [ട്രോൾ]: കിടിലൻ വൺ-ലൈനർ ട്രോൾ കമന്റ്.
-2. [റിലേറ്റബിൾ]: സാധാരണക്കാർക്ക് തോന്നുന്ന കമന്റ്.
-3. [ചോദ്യം]: ലൈക്കും റിപ്ലൈയും കിട്ടുന്ന ചോദ്യം.
-"""
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 def extract_url(text):
     urls = re.findall(r'(https?://[^\s]+)', text)
@@ -49,14 +47,7 @@ def download_video(url, output_path="short.mp4"):
         ydl.download([url])
     return output_path
 
-def analyze_video(video_file, prompt):
-    while video_file.state.name == "PROCESSING":
-        time.sleep(2)
-        video_file = ai_client.files.get(name=video_file.name)
-
-    if video_file.state.name == "FAILED":
-        raise Exception("Google failed to process video.")
-
+def query_gemini(video_file, prompt):
     models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
     for m in models:
         for _ in range(2):
@@ -67,103 +58,117 @@ def analyze_video(video_file, prompt):
                 time.sleep(2)
     raise Exception("AI is busy right now")
 
-def process_video_and_get_reply(url):
-    vid = download_video(url)
-    vfile = ai_client.files.upload(file=vid)
-    reply_text = analyze_video(vfile, MALAYALAM_PROMPT)
-    ai_client.files.delete(name=vfile.name)
-    if os.path.exists(vid):
-        os.remove(vid)
-    return reply_text
+def query_gemini_text(prompt):
+    models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
+    for m in models:
+        for _ in range(2):
+            try:
+                res = ai_client.models.generate_content(model=m, contents=prompt)
+                return res.text
+            except Exception:
+                time.sleep(2)
+    raise Exception("AI is busy right now")
 
-# ================= WHATSAPP (GREEN API) HELPERS =================
-def send_whatsapp_message(chat_id, message_text):
-    if not GREEN_API_TOKEN:
-        return
-    url = f"{GREEN_API_URL}/waInstance{GREEN_API_ID}/sendMessage/{GREEN_API_TOKEN}"
-    payload = {"chatId": chat_id, "message": message_text}
-    headers = {"Content-Type": "application/json"}
-    requests.post(url, json=payload, headers=headers)
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    name = message.from_user.first_name or "Machane"
+    bot.reply_to(
+        message, 
+        f"Hey {name} bro! 🔥\n\nഏതെങ്കിലും Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് ഇങ്ങോട്ട് അയച്ചോ. "
+        "ഞാൻ കണ്ടിട്ട് സംഭവം എന്താണെന്നും, ഇത് നമുക്ക് എങ്ങനെ യൂസ് ചെയ്യാമെന്നും, ഇത് ഉള്ളതാണോ അതോ വെറും തള്ളാണോ (Fact-Check) എന്നും പറഞ്ഞു തരാം!\n\n"
+        "വീഡിയോ കഴിഞ്ഞിട്ട് അതിനെ പറ്റി എന്തെങ്കിലും സംശയം ചോദിച്ചാലും ഞാൻ ക്ലിയർ ചെയ്തു തരാം! 🚀"
+    )
 
-def process_whatsapp_async(chat_id, url):
-    try:
-        reply = process_video_and_get_reply(url)
-        send_whatsapp_message(chat_id, reply)
-    except Exception as e:
-        print(f"WhatsApp Error: {e}")
-        send_whatsapp_message(chat_id, f"⚠️ വീഡിയോ പ്രോസസ്സ് ചെയ്യാൻ സാധിച്ചില്ല: {e}")
+@bot.message_handler(func=lambda msg: True)
+def handle_incoming_message(message):
+    chat_id = message.chat.id
+    name = message.from_user.first_name or "Machane"
+    url = extract_url(message.text)
 
-# Automatically connects Green API to Render on startup!
-def auto_setup_green_api():
-    if GREEN_API_TOKEN:
+    # CASE 1: USER SENT A NEW REEL / SHORT
+    if url:
+        status = bot.reply_to(message, f"Wait {name} bro... ഞാൻ വീഡിയോ മൊത്തത്തിൽ ഒന്ന് കണ്ടു നോക്കട്ടെ! 👀🍿")
+
         try:
-            url = f"{GREEN_API_URL}/waInstance{GREEN_API_ID}/setSettings/{GREEN_API_TOKEN}"
-            payload = {
-                "webhookUrl": "https://malayalam-reel-bot.onrender.com/whatsapp",
-                "incomingWebhook": "yes"
+            vid = download_video(url)
+            vfile = ai_client.files.upload(file=vid)
+
+            # Wait for processing
+            while vfile.state.name == "PROCESSING":
+                time.sleep(2)
+                vfile = ai_client.files.get(name=vfile.name)
+
+            prompt = f"""
+            You are a super smart, witty, and fun AI buddy who speaks in vibrant MANGLISH (a natural blend of Malayalam and English, common among Kerala youth).
+            User's name is: {name}.
+
+            Analyze this video and provide an engaging, structured reply formatted as follows:
+
+            👋 Hey {name} bro! ദാ സംഭവം ഞാൻ കണ്ടു:
+
+            📌 WHAT'S THE SCENE? (Quick Breakdown)
+            • Short, catchy summary of what happens in the video (2-3 punchy bullet points).
+
+            💡 HOW TO UTILIZE THIS? (നമുക്ക് എങ്ങനെ യൂസ് ചെയ്യാം?)
+            • Explain practical takeaways. If it's a tech tip/life hack/recipe/workout: give clear, actionable instructions on how {name} can actually use or apply this in daily life.
+
+            🕵️‍♂️ FACT-CHECK & VERDICT (സത്യമോ അതോ വെറും തള്ളോ?)
+            • Is this claim 100% real, safe, and practical? Or is it clickbait/exaggeration? Give your honest, unfiltered verdict.
+
+            💬 NEXT MOVE:
+            • Add a friendly closing line: tell {name} that if they have any doubts about this video (like ingredients, alternatives, price, or steps), just ask right now!
+            """
+
+            reply_text = query_gemini(vfile, prompt)
+            
+            # Save context for follow-up questions
+            user_sessions[chat_id] = {
+                "name": name,
+                "last_context": reply_text
             }
-            requests.post(url, json=payload, timeout=10)
-            print("✅ Green API auto-configured!")
+
+            ai_client.files.delete(name=vfile.name)
+            if os.path.exists(vid):
+                os.remove(vid)
+
+            bot.edit_message_text(reply_text, chat_id=chat_id, message_id=status.message_id)
+
         except Exception as e:
-            print(f"Green API config warning: {e}")
+            print(f"Error: {e}")
+            bot.reply_to(message, f"⚠️ {name} bro, ആ വീഡിയോ ലോഡ് ചെയ്യാൻ പറ്റിയില്ല. ലിങ്ക് പബ്ലിക് ആണോ എന്ന് നോക്കിയിട്ട് ഒന്നുകൂടി അയച്ചു നോക്ക്!")
 
-threading.Thread(target=auto_setup_green_api, daemon=True).start()
+    # CASE 2: USER IS ASKING A FOLLOW-UP QUESTION ABOUT THE LAST VIDEO
+    else:
+        if chat_id in user_sessions and user_sessions[chat_id].get("last_context"):
+            session = user_sessions[chat_id]
+            last_context = session["last_context"]
+            user_question = message.text
 
-# ================= TELEGRAM HANDLERS =================
-if tele_bot:
-    @tele_bot.message_handler(commands=['start'])
-    def tele_start(message):
-        tele_bot.reply_to(message, "നമസ്കാരം! 👋 ഏതെങ്കിലും Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് അയക്കൂ, ഞാൻ മലയാളത്തിൽ വിശദീകരിക്കാം!")
+            bot.send_chat_action(chat_id, 'typing')
 
-    @tele_bot.message_handler(func=lambda msg: True)
-    def tele_on_message(message):
-        url = extract_url(message.text)
-        if not url:
-            tele_bot.reply_to(message, "ദയവായി ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് അയക്കൂ! 🔗")
-            return
+            followup_prompt = f"""
+            You are a friendly, witty AI companion talking to {name}.
+            Here is the context of the video you both just analyzed:
+            \"\"\"{last_context}\"\"\"
 
-        status = tele_bot.reply_to(message, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കാത്തിരിക്കൂ)")
-        try:
-            reply_text = process_video_and_get_reply(url)
-            tele_bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=status.message_id)
-        except Exception as e:
-            tele_bot.reply_to(message, f"⚠️ Error: {e}")
+            {name} just asked this follow-up question:
+            \"{user_question}\"
 
-    def run_tele_bot():
-        print("🚀 Telegram bot listening...")
-        tele_bot.infinity_polling()
+            Answer {name}'s question directly based on the video context. 
+            Keep it natural, witty, and in MANGLISH (Malayalam + English mixed). Address them warmly by name ({name} bro / machane).
+            """
 
-    threading.Thread(target=run_tele_bot, daemon=True).start()
+            try:
+                answer = query_gemini_text(followup_prompt)
+                bot.reply_to(message, answer)
+            except Exception as e:
+                bot.reply_to(message, f"Oops {name} bro, ചെറിയൊരു എറർ വന്നു. ഒന്നുകൂടി ചോദിക്കാമോ?")
+        else:
+            bot.reply_to(
+                message, 
+                f"ഹലോ {name} bro! ആദ്യം ഏതെങ്കിലും ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് ഇങ്ങോട്ട് അയക്കൂ. "
+                "എന്നിട്ട് അതിനെ പറ്റി എന്ത് വേണമെങ്കിലും ചോദിച്ചോ! 😉🎥"
+            )
 
-# ================= WEBHOOK ROUTES =================
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is alive and running 24/7 for Telegram & WhatsApp!"
-
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    data = request.get_json(silent=True) or {}
-    type_webhook = data.get("typeWebhook")
-
-    if type_webhook == "incomingMessageReceived":
-        sender_data = data.get("senderData", {})
-        chat_id = sender_data.get("chatId")
-        msg_data = data.get("messageData", {})
-
-        # Extract text message
-        text = (
-            msg_data.get("textMessageData", {}).get("textMessage")
-            or msg_data.get("extendedTextMessageData", {}).get("text")
-            or ""
-        )
-
-        url = extract_url(text)
-        if url:
-            send_whatsapp_message(chat_id, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കുറച്ചു സെക്കൻഡ് കാത്തിരിക്കൂ)")
-            threading.Thread(target=process_whatsapp_async, args=(chat_id, url), daemon=True).start()
-
-    return Response("OK", status=200)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+print("🚀 Smart Manglish Bot Running...")
+bot.infinity_polling()
