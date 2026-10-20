@@ -13,8 +13,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Store memory of the last video per user for follow-up questions
-# Format: { chat_id: {"summary": "...", "name": "..."} }
 user_sessions = {}
 
 # Keep-alive server for Render
@@ -53,10 +51,10 @@ def query_gemini(video_file, prompt):
         for _ in range(2):
             try:
                 res = ai_client.models.generate_content(model=m, contents=[video_file, prompt])
-                return res.text
+                return res.text.strip()
             except Exception:
                 time.sleep(2)
-    raise Exception("AI is busy right now")
+    raise Exception("AI busy")
 
 def query_gemini_text(prompt):
     models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
@@ -64,66 +62,53 @@ def query_gemini_text(prompt):
         for _ in range(2):
             try:
                 res = ai_client.models.generate_content(model=m, contents=prompt)
-                return res.text
+                return res.text.strip()
             except Exception:
                 time.sleep(2)
-    raise Exception("AI is busy right now")
+    raise Exception("AI busy")
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    name = message.from_user.first_name or "Machane"
-    bot.reply_to(
-        message, 
-        f"Hey {name} bro! 🔥\n\nഏതെങ്കിലും Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് ഇങ്ങോട്ട് അയച്ചോ. "
-        "ഞാൻ കണ്ടിട്ട് സംഭവം എന്താണെന്നും, ഇത് നമുക്ക് എങ്ങനെ യൂസ് ചെയ്യാമെന്നും, ഇത് ഉള്ളതാണോ അതോ വെറും തള്ളാണോ (Fact-Check) എന്നും പറഞ്ഞു തരാം!\n\n"
-        "വീഡിയോ കഴിഞ്ഞിട്ട് അതിനെ പറ്റി എന്തെങ്കിലും സംശയം ചോദിച്ചാലും ഞാൻ ക്ലിയർ ചെയ്തു തരാം! 🚀"
-    )
+    bot.reply_to(message, "Send a Reel or Short link.")
 
 @bot.message_handler(func=lambda msg: True)
 def handle_incoming_message(message):
     chat_id = message.chat.id
-    name = message.from_user.first_name or "Machane"
     url = extract_url(message.text)
 
-    # CASE 1: USER SENT A NEW REEL / SHORT
+    # CASE 1: USER SENT A REEL / SHORT
     if url:
-        status = bot.reply_to(message, f"Wait {name} bro... ഞാൻ വീഡിയോ മൊത്തത്തിൽ ഒന്ന് കണ്ടു നോക്കട്ടെ! 👀🍿")
+        status = bot.reply_to(message, "...")
 
         try:
             vid = download_video(url)
             vfile = ai_client.files.upload(file=vid)
 
-            # Wait for processing
             while vfile.state.name == "PROCESSING":
                 time.sleep(2)
                 vfile = ai_client.files.get(name=vfile.name)
 
-            prompt = f"""
-            You are a super smart, witty, and fun AI buddy who speaks in vibrant MANGLISH (a natural blend of Malayalam and English, common among Kerala youth).
-            User's name is: {name}.
+            prompt = """
+            You are ScrollPartner.
+            Watch and listen to this short-form video carefully.
+            Generate ONE ready-to-send, sharp, witty reaction/reply grounded strictly in what actually happens in the video.
 
-            Analyze this video and provide an engaging, structured reply formatted as follows:
-
-            👋 Hey {name} bro! ദാ സംഭവം ഞാൻ കണ്ടു:
-
-            📌 WHAT'S THE SCENE? (Quick Breakdown)
-            • Short, catchy summary of what happens in the video (2-3 punchy bullet points).
-
-            💡 HOW TO UTILIZE THIS? (നമുക്ക് എങ്ങനെ യൂസ് ചെയ്യാം?)
-            • Explain practical takeaways. If it's a tech tip/life hack/recipe/workout: give clear, actionable instructions on how {name} can actually use or apply this in daily life.
-
-            🕵️‍♂️ FACT-CHECK & VERDICT (സത്യമോ അതോ വെറും തള്ളോ?)
-            • Is this claim 100% real, safe, and practical? Or is it clickbait/exaggeration? Give your honest, unfiltered verdict.
-
-            💬 NEXT MOVE:
-            • Add a friendly closing line: tell {name} that if they have any doubts about this video (like ingredients, alternatives, price, or steps), just ask right now!
+            RULES:
+            1. Length: Exactly 1 to 3 sentences. No more.
+            2. Language: Natural conversational Malayalam-English mix (Manglish). Use Malayalam script naturally blended with everyday English words as real people speak.
+            3. Tone: Real Malayali wit, observant, clever, and grounded. Sound like an actual person texting a comeback or insight, NOT an AI summary.
+            4. ABSOLUTELY AVOID:
+               - Cringe slang or filler ("bro", "machane", "mass", "pwoli").
+               - Any headings, bullet points, intros ("Here is my thought:"), or sign-offs.
+               - Excessive emojis (0 to 1 maximum).
+               - Assuming gender or personal relationships.
+               - Generic motivational advice or obvious summaries.
+            5. Deliver ONLY the final text.
             """
 
             reply_text = query_gemini(vfile, prompt)
-            
-            # Save context for follow-up questions
+
             user_sessions[chat_id] = {
-                "name": name,
                 "last_context": reply_text
             }
 
@@ -135,40 +120,32 @@ def handle_incoming_message(message):
 
         except Exception as e:
             print(f"Error: {e}")
-            bot.reply_to(message, f"⚠️ {name} bro, ആ വീഡിയോ ലോഡ് ചെയ്യാൻ പറ്റിയില്ല. ലിങ്ക് പബ്ലിക് ആണോ എന്ന് നോക്കിയിട്ട് ഒന്നുകൂടി അയച്ചു നോക്ക്!")
+            bot.reply_to(message, "Link open aavanilla, vere try cheyy.")
 
-    # CASE 2: USER IS ASKING A FOLLOW-UP QUESTION ABOUT THE LAST VIDEO
+    # CASE 2: FOLLOW-UP CHAT
     else:
         if chat_id in user_sessions and user_sessions[chat_id].get("last_context"):
-            session = user_sessions[chat_id]
-            last_context = session["last_context"]
+            last_context = user_sessions[chat_id]["last_context"]
             user_question = message.text
 
             bot.send_chat_action(chat_id, 'typing')
 
             followup_prompt = f"""
-            You are a friendly, witty AI companion talking to {name}.
-            Here is the context of the video you both just analyzed:
-            \"\"\"{last_context}\"\"\"
+            You are ScrollPartner.
+            Previous context of the reel: \"\"\"{last_context}\"\"\"
+            User just sent: \"\"\"{user_question}\"\"\"
 
-            {name} just asked this follow-up question:
-            \"{user_question}\"
-
-            Answer {name}'s question directly based on the video context. 
-            Keep it natural, witty, and in MANGLISH (Malayalam + English mixed). Address them warmly by name ({name} bro / machane).
+            Respond in 1-2 sharp, natural sentences in conversational Manglish. 
+            Zero robotic fluff, zero cringe slang, strictly context-driven. Deliver ONLY the reply.
             """
 
             try:
                 answer = query_gemini_text(followup_prompt)
                 bot.reply_to(message, answer)
-            except Exception as e:
-                bot.reply_to(message, f"Oops {name} bro, ചെറിയൊരു എറർ വന്നു. ഒന്നുകൂടി ചോദിക്കാമോ?")
+            except Exception:
+                bot.reply_to(message, "Onnude parayamo, manasilayilla.")
         else:
-            bot.reply_to(
-                message, 
-                f"ഹലോ {name} bro! ആദ്യം ഏതെങ്കിലും ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് ഇങ്ങോട്ട് അയക്കൂ. "
-                "എന്നിട്ട് അതിനെ പറ്റി എന്ത് വേണമെങ്കിലും ചോദിച്ചോ! 😉🎥"
-            )
+            bot.reply_to(message, "Aadya oru reel link ayakk.")
 
-print("🚀 Smart Manglish Bot Running...")
+print("🚀 ScrollPartner Running...")
 bot.infinity_polling()
