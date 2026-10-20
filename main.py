@@ -2,22 +2,22 @@ import os
 import re
 import time
 import threading
+import requests
 from flask import Flask, request, Response
 import telebot
 import yt_dlp
 from google import genai
-from twilio.rest import Client
 
 # API Keys from Render Environment
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+GREEN_API_ID = os.getenv("GREEN_API_ID", "710722774773")
+GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN")
+GREEN_API_URL = "https://7107.api.greenapi.com"
 
 # Initialize Bots
-tele_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+tele_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
 
 app = Flask(__name__)
 
@@ -76,77 +76,93 @@ def process_video_and_get_reply(url):
         os.remove(vid)
     return reply_text
 
-# ================= TELEGRAM HANDLERS =================
-@tele_bot.message_handler(commands=['start'])
-def tele_start(message):
-    tele_bot.reply_to(message, "നമസ്കാരം! 👋 ഏതെങ്കിലും Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് അയക്കൂ, ഞാൻ മലയാളത്തിൽ വിശദീകരിക്കാം!")
-
-@tele_bot.message_handler(func=lambda msg: True)
-def tele_on_message(message):
-    url = extract_url(message.text)
-    if not url:
-        tele_bot.reply_to(message, "ദയവായി ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് അയക്കൂ! 🔗")
+# ================= WHATSAPP (GREEN API) HELPERS =================
+def send_whatsapp_message(chat_id, message_text):
+    if not GREEN_API_TOKEN:
         return
+    url = f"{GREEN_API_URL}/waInstance{GREEN_API_ID}/sendMessage/{GREEN_API_TOKEN}"
+    payload = {"chatId": chat_id, "message": message_text}
+    headers = {"Content-Type": "application/json"}
+    requests.post(url, json=payload, headers=headers)
 
-    status = tele_bot.reply_to(message, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കാത്തിരിക്കൂ)")
+def process_whatsapp_async(chat_id, url):
     try:
-        reply_text = process_video_and_get_reply(url)
-        tele_bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=status.message_id)
-    except Exception as e:
-        print(f"Telegram Error: {e}")
-        tele_bot.reply_to(message, f"⚠️ Error: {e}")
-
-# ================= WHATSAPP HANDLERS =================
-def process_whatsapp_async(from_number, to_number, url):
-    """Processes video in background and sends WhatsApp message back"""
-    try:
-        reply_text = process_video_and_get_reply(url)
-        twilio_client.messages.create(body=reply_text, from_=to_number, to=from_number)
+        reply = process_video_and_get_reply(url)
+        send_whatsapp_message(chat_id, reply)
     except Exception as e:
         print(f"WhatsApp Error: {e}")
-        twilio_client.messages.create(
-            body=f"⚠️ ക്ഷമിക്കണം, വീഡിയോ പ്രോസസ്സ് ചെയ്യാൻ സാധിച്ചില്ല: {e}",
-            from_=to_number,
-            to=from_number
-        )
+        send_whatsapp_message(chat_id, f"⚠️ വീഡിയോ പ്രോസസ്സ് ചെയ്യാൻ സാധിച്ചില്ല: {e}")
 
+# Automatically connects Green API to Render on startup!
+def auto_setup_green_api():
+    if GREEN_API_TOKEN:
+        try:
+            url = f"{GREEN_API_URL}/waInstance{GREEN_API_ID}/setSettings/{GREEN_API_TOKEN}"
+            payload = {
+                "webhookUrl": "https://malayalam-reel-bot.onrender.com/whatsapp",
+                "incomingWebhook": "yes"
+            }
+            requests.post(url, json=payload, timeout=10)
+            print("✅ Green API auto-configured!")
+        except Exception as e:
+            print(f"Green API config warning: {e}")
+
+threading.Thread(target=auto_setup_green_api, daemon=True).start()
+
+# ================= TELEGRAM HANDLERS =================
+if tele_bot:
+    @tele_bot.message_handler(commands=['start'])
+    def tele_start(message):
+        tele_bot.reply_to(message, "നമസ്കാരം! 👋 ഏതെങ്കിലും Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് അയക്കൂ, ഞാൻ മലയാളത്തിൽ വിശദീകരിക്കാം!")
+
+    @tele_bot.message_handler(func=lambda msg: True)
+    def tele_on_message(message):
+        url = extract_url(message.text)
+        if not url:
+            tele_bot.reply_to(message, "ദയവായി ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് അയക്കൂ! 🔗")
+            return
+
+        status = tele_bot.reply_to(message, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കാത്തിരിക്കൂ)")
+        try:
+            reply_text = process_video_and_get_reply(url)
+            tele_bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=status.message_id)
+        except Exception as e:
+            tele_bot.reply_to(message, f"⚠️ Error: {e}")
+
+    def run_tele_bot():
+        print("🚀 Telegram bot listening...")
+        tele_bot.infinity_polling()
+
+    threading.Thread(target=run_tele_bot, daemon=True).start()
+
+# ================= WEBHOOK ROUTES =================
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is alive and running 24/7 for Telegram & WhatsApp!"
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
-    body = request.form.get("Body", "")
-    from_number = request.form.get("From")
-    to_number = request.form.get("To")
+    data = request.get_json(silent=True) or {}
+    type_webhook = data.get("typeWebhook")
 
-    url = extract_url(body)
-    if not url:
-        twilio_client.messages.create(
-            body="നമസ്കാരം! 👋 ദയവായി ഒരു Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് അയക്കൂ!",
-            from_=to_number,
-            to=from_number
+    if type_webhook == "incomingMessageReceived":
+        sender_data = data.get("senderData", {})
+        chat_id = sender_data.get("chatId")
+        msg_data = data.get("messageData", {})
+
+        # Extract text message
+        text = (
+            msg_data.get("textMessageData", {}).get("textMessage")
+            or msg_data.get("extendedTextMessageData", {}).get("text")
+            or ""
         )
-        return Response("OK", status=200)
 
-    # Send quick acknowledgment
-    twilio_client.messages.create(
-        body="⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കുറച്ചു സെക്കൻഡ് കാത്തിരിക്കൂ)",
-        from_=to_number,
-        to=from_number
-    )
-
-    # Process in background thread so Twilio doesn't time out
-    threading.Thread(target=process_whatsapp_async, args=(from_number, to_number, url), daemon=True).start()
+        url = extract_url(text)
+        if url:
+            send_whatsapp_message(chat_id, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (കുറച്ചു സെക്കൻഡ് കാത്തിരിക്കൂ)")
+            threading.Thread(target=process_whatsapp_async, args=(chat_id, url), daemon=True).start()
 
     return Response("OK", status=200)
-
-# Run Telegram Polling in Background Thread
-def run_tele_bot():
-    print("🚀 Telegram bot listening...")
-    tele_bot.infinity_polling()
-
-threading.Thread(target=run_tele_bot, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
