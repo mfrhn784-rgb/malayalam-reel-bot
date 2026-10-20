@@ -2,4 +2,4 @@ pyTelegramBotAPI
 yt-dlp
 google-genai
 flask
-twilio
+requests
