@@ -44,6 +44,14 @@ def download_video(url, output_path="short.mp4"):
     return output_path
 
 def analyze_video(video_file, prompt):
+    # Wait until Google finishes decoding the video
+    while video_file.state.name == "PROCESSING":
+        time.sleep(2)
+        video_file = ai_client.files.get(name=video_file.name)
+
+    if video_file.state.name == "FAILED":
+        raise Exception("Google failed to process video.")
+
     models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
     for m in models:
         for _ in range(2):
@@ -65,7 +73,7 @@ def on_message(message):
         bot.reply_to(message, "ദയവായി ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് അയക്കൂ! 🔗")
         return
 
-    status = bot.reply_to(message, "⏳ വീഡിയോ വിശകലനം ചെയ്യുന്നു... (കാത്തിരിക്കൂ)")
+    status = bot.reply_to(message, "⏳ വീഡിയോ ഡൗൺലോഡ് ചെയ്തു വിശകലനം ചെയ്യുന്നു... (ദയവായി കുറച്ചു സെക്കൻഡ് കാത്തിരിക്കൂ)")
 
     try:
         vid = download_video(url)
@@ -91,7 +99,7 @@ def on_message(message):
         bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=status.message_id)
     except Exception as e:
         print(f"Error: {e}")
-        bot.reply_to(message, "⚠️ വീഡിയോ പ്രോസസ്സ് ചെയ്യാൻ സാധിച്ചില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.")
+        bot.reply_to(message, f"⚠️ Error: {e}")
 
 print("🚀 Bot running...")
 bot.infinity_polling()
