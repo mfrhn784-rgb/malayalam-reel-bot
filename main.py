@@ -74,7 +74,7 @@ def handle_video_link(message):
         bot.reply_to(message, "ദയവായി ഒരു സാധുവായ Instagram Reel അല്ലെങ്കിൽ YouTube Short ലിങ്ക് അയക്കൂ! 🔗")
         return
 
-    status_msg = bot.reply_to(checking (waitt10-15 സെക്കൻഡ്!)")
+    status_msg = bot.reply_to(message, "⏳ checking... (10-15 സെക്കൻഡ് കാത്തിരിക്കൂ)")
 
     try:
         # Download
