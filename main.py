@@ -9,11 +9,14 @@ from google import genai
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_ID = 8190105957  # Your Admin Telegram ID
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Storage for memory and user analytics
 user_sessions = {}
+user_db = {}  # {user_id: {"name": str, "username": str, "count": int}}
 
 # Keep-alive server for Render
 class HealthHandler(BaseHTTPRequestHandler):
@@ -51,10 +54,10 @@ def query_gemini(video_file, prompt):
         for _ in range(2):
             try:
                 res = ai_client.models.generate_content(model=m, contents=[video_file, prompt])
-                return res.text
+                return res.text.strip()
             except Exception:
                 time.sleep(2)
-    raise Exception("AI is busy right now")
+    raise Exception("AI busy")
 
 def query_gemini_text(prompt):
     models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
@@ -62,33 +65,77 @@ def query_gemini_text(prompt):
         for _ in range(2):
             try:
                 res = ai_client.models.generate_content(model=m, contents=prompt)
-                return res.text
+                return res.text.strip()
             except Exception:
                 time.sleep(2)
-    raise Exception("AI is busy right now")
+    raise Exception("AI busy")
 
+def track_user(user, is_reel=False):
+    """Tracks users and alerts admin on new signups"""
+    uid = user.id
+    name = user.first_name or "Unknown"
+    if user.last_name:
+        name += f" {user.last_name}"
+    username = user.username or ""
+
+    is_new = uid not in user_db
+
+    if is_new:
+        user_db[uid] = {"name": name, "username": username, "count": 0}
+        print(f"👤 NEW USER DETECTED: {name} (@{username}) [ID: {uid}]")
+        # Send secret alert to your personal Telegram
+        try:
+            bot.send_message(
+                ADMIN_ID, 
+                f"🔔 *New User Alert!*\n\n• Name: {name}\n• Username: @{username if username else 'None'}\n• ID: `{uid}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            print(f"Could not send alert to admin: {e}")
+
+    if is_reel:
+        user_db[uid]["count"] += 1
+        print(f"🎬 Reel analyzed for {name} (Total: {user_db[uid]['count']})")
+
+# ================= ADMIN / STATS COMMAND =================
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    if message.from_user.id != ADMIN_ID:
+        return  # Ignore unauthorized users
+
+    total_users = len(user_db)
+    total_reels = sum(u["count"] for u in user_db.values())
+
+    report = "📊 *SCROLLPARTNER OVERVIEW*\n\n"
+    report += f"👥 *Total Users:* {total_users}\n"
+    report += f"🎬 *Total Reels Analyzed:* {total_reels}\n\n"
+    report += "━━━━━━━━━━━━━━━\n"
+    report += "*Recent Users:*\n"
+
+    if not user_db:
+        report += "_No users tracked yet._"
+    else:
+        for uid, data in list(user_db.items())[-15:]:
+            uname = f"@{data['username']}" if data['username'] else "No username"
+            report += f"• *{data['name']}* ({uname})\n  └ Reels: {data['count']} | ID: `{uid}`\n"
+
+    bot.reply_to(message, report, parse_mode="Markdown")
+
+# ================= USER COMMANDS =================
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    name = message.from_user.first_name or "Friend"
-    bot.reply_to(
-        message, 
-        f"Hey {name}! ⚡\n\n"
-        "ഏതെങ്കിലും Reel അല്ലെങ്കിൽ Short ലിങ്ക് ഇങ്ങോട്ട് അയച്ചോ. വെറുതെ കണ്ടത് അതുപോലെ പറയുന്ന ബോട്ട് അല്ല ഇത്.\n\n"
-        "• ആ വീഡിയോയുടെ യഥാർത്ഥ സീൻ എന്താണെന്ന് ഡീറ്റെയിൽഡ് ആയി പറയും.\n"
-        "• ഇത് നമ്മുടെ ലൈഫിൽ എങ്ങനെ പ്രാക്ടിക്കൽ ആയി ഉപയോഗിക്കാം എന്ന് പറഞ്ഞുതരും.\n"
-        "• ക്ലിക്ക്ബെയ്റ്റോ തള്ളോ ഉണ്ടെങ്കിൽ അത് കയ്യോടെ പിടിക്കും (Reality Check).\n\n"
-        "Send a link whenever you're ready!"
-    )
+    track_user(message.from_user, is_reel=False)
+    bot.reply_to(message, "Send a Reel or Short link.")
 
 @bot.message_handler(func=lambda msg: True)
 def handle_incoming_message(message):
     chat_id = message.chat.id
-    name = message.from_user.first_name or "Friend"
     url = extract_url(message.text)
 
-    # CASE 1: USER SENT A REEL / SHORT
+    # CASE 1: REEL / SHORT LINK
     if url:
-        status = bot.reply_to(message, f"Got it {name}. വീഡിയോയും അതിലെ ഡീറ്റെയിൽസും ഒന്നു അനലൈസ് ചെയ്യട്ടെ... 🔍")
+        track_user(message.from_user, is_reel=True)
+        status = bot.reply_to(message, "...")
 
         try:
             vid = download_video(url)
@@ -98,35 +145,27 @@ def handle_incoming_message(message):
                 time.sleep(2)
                 vfile = ai_client.files.get(name=vfile.name)
 
-            prompt = f"""
-            You are an ultra-sharp, observant, and brutally honest content analyst talking directly to {name}.
-            
-            YOUR VOICE & TONE:
-            - Write in natural, fluid MANGLISH (Malayalam script heavily blended with everyday conversational English).
-            - DO NOT use stiff, textbook Malayalam (avoid formal words like "ഉപയോഗപ്രദമായത്", "സ്ഥിരീകരണം", "സംഗ്രഹം").
-            - Use real conversational phrases that smart Malayalis use: "Scene ithaanu", "Actually...", "Main catch", "Practical aano ennu chodichaal", "Pure marketing gimmick", "Oru kaaryam shradhicho".
-            - Tone: Analytical, witty, realistic, zero cringe, no forced "bro/machane" repetition.
-            - High-IQ: Notice subtle details (hidden text, visual cuts, whether the creator is staging it, affiliate selling, or genuine value).
+            prompt = """
+            You are ScrollPartner.
+            Watch and listen to this short-form video carefully.
+            Generate ONE ready-to-send, sharp, witty reaction/reply grounded strictly in what actually happens in the video.
 
-            FORMAT YOUR RESPONSE LIKE THIS:
-
-            🎬 SCENE BREAKDOWN (എന്താണ് യഥാർത്ഥത്തിൽ നടക്കുന്നത്?)
-            • 2-3 sharp sentences explaining the real core concept without any filler. What is the creator trying to do or show?
-
-            💡 HOW TO ACTUALLY USE THIS (നമുക്ക് എന്ത് പ്രയോജനം?)
-            • Skip the obvious fluff. How can {name} actually utilize or implement this in daily life (tools, shortcuts, techniques)? If it's a recipe/workout/hack, give the actual actionable takeaway or a better alternative.
-
-            🔍 REALITY CHECK & VERDICT (തള്ളോ അതോ കാര്യമുണ്ടോ?)
-            • Unfiltered critique: Is this 100% genuine, safe, and practical? Or is it exaggerated for views/engagement? Spot the catch or missing context.
-
-            💭 ONE QUICK QUESTION FOR YOU:
-            • Ask {name} one sharp, intriguing question related to this video topic to spark a debate or follow-up discussion.
+            RULES:
+            1. Length: Exactly 1 to 3 sentences. No more.
+            2. Language: Natural conversational Malayalam-English mix (Manglish). Use Malayalam script naturally blended with everyday English words as real people speak.
+            3. Tone: Real Malayali wit, observant, clever, and grounded. Sound like an actual person texting a comeback or insight, NOT an AI summary.
+            4. ABSOLUTELY AVOID:
+               - Cringe slang or filler ("bro", "machane", "mass", "pwoli").
+               - Any headings, bullet points, intros, or sign-offs.
+               - Excessive emojis (0 to 1 maximum).
+               - Assuming gender or personal relationships.
+               - Generic motivational advice or obvious summaries.
+            5. Deliver ONLY the final text.
             """
 
             reply_text = query_gemini(vfile, prompt)
-            
+
             user_sessions[chat_id] = {
-                "name": name,
                 "last_context": reply_text
             }
 
@@ -138,39 +177,33 @@ def handle_incoming_message(message):
 
         except Exception as e:
             print(f"Error: {e}")
-            bot.reply_to(message, f"⚠️ {name}, ആ വീഡിയോ പ്രോസസ്സ് ചെയ്യാൻ പറ്റിയില്ല. ലിങ്ക് പബ്ലിക് ആണെന്ന് ഉറപ്പുവരുത്തി വീണ്ടും അയക്കൂ.")
+            bot.reply_to(message, "Link open aavanilla, vere try cheyy.")
 
-    # CASE 2: FOLLOW-UP QUESTIONS
+    # CASE 2: FOLLOW-UP QUESTION
     else:
+        track_user(message.from_user, is_reel=False)
         if chat_id in user_sessions and user_sessions[chat_id].get("last_context"):
-            session = user_sessions[chat_id]
-            last_context = session["last_context"]
+            last_context = user_sessions[chat_id]["last_context"]
             user_question = message.text
 
             bot.send_chat_action(chat_id, 'typing')
 
             followup_prompt = f"""
-            You are a sharp, analytical AI conversing with {name}.
-            Context of the video you analyzed previously:
-            \"\"\"{last_context}\"\"\"
+            You are ScrollPartner.
+            Previous context of the reel: \"\"\"{last_context}\"\"\"
+            User just sent: \"\"\"{user_question}\"\"\"
 
-            {name} asked:
-            \"{user_question}\"
-
-            Provide an intelligent, direct, and insightful response in natural MANGLISH (Malayalam script blended with conversational English). 
-            Do not give vague, generic answers. Be specific, realistic, and helpful.
+            Respond in 1-2 sharp, natural sentences in conversational Manglish. 
+            Zero robotic fluff, zero cringe slang, strictly context-driven. Deliver ONLY the reply.
             """
 
             try:
                 answer = query_gemini_text(followup_prompt)
                 bot.reply_to(message, answer)
-            except Exception as e:
-                bot.reply_to(message, "ചെറിയൊരു എറർ വന്നു. ഒന്നുകൂടി ചോദിക്കാമോ?")
+            except Exception:
+                bot.reply_to(message, "Onnude parayamo, manasilayilla.")
         else:
-            bot.reply_to(
-                message, 
-                f"ഹലോ {name}! ആദ്യം ഒരു Reel അല്ലെങ്കിൽ Short ലിങ്ക് അയക്കൂ, എന്നിട്ട് അതിനെ പറ്റി നമുക്ക് ഡിസ്കസ് ചെയ്യാം! 🎬"
-            )
+            bot.reply_to(message, "Aadya oru reel link ayakk.")
 
-print("🚀 High-IQ Manglish Bot Running...")
+print("🚀 ScrollPartner with Admin Analytics Running...")
 bot.infinity_polling()
